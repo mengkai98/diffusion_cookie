@@ -4,3 +4,4 @@
 *.png
 __pycache__
 train_saves
+*.log

@@ -1,0 +1,1 @@
+nohup python3 $@ > train.log 2>&1 &

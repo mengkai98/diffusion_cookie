@@ -1,6 +1,6 @@
 import torch
 from torchvision import datasets
-from torchvision.transforms import ToTensor
+from torchvision import transforms
 from torch.utils.data import DataLoader
 import os
 import torch.nn.functional as F
@@ -10,6 +10,9 @@ from model.unet import UNet
 from diffusion.ddpm import DDPM
 from torchvision.utils import make_grid
 from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import StepLR
+import random
+import numpy as np
 
 
 def train(
@@ -35,6 +38,8 @@ def train(
         model.load_state_dict(torch.load(resume, weights_only=True))
     model.train()
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0)
+    scheduler = StepLR(opt, step_size=50, gamma=0.1)
+    # print(scheduler.get_last_lr())
     noise_img = torch.randn(9, 3, 32, 32)
     for epoch in range(total_epoch):
         # 训练
@@ -73,26 +78,37 @@ def train(
         # denoise
         indices = list(range(1000))[::-1]
         show_imgs = [noise_img]
+        denoise_img = noise_img.clone()
         with torch.no_grad():
             model.eval()
             for t in indices:
-                noise_img = diffusion.denoise(model, noise_img, t, device, True)
+                denoise_img = diffusion.denoise(model, denoise_img, t, device, True)
                 if t % 100 == 0:
-                    show_imgs.append(noise_img.cpu())
+                    show_imgs.append(denoise_img.cpu())
+        show_imgs = [(torch.clamp(img, min=-1, max=1) + 1) / 2 for img in show_imgs]
         concat_img = [make_grid(denoise_img, nrow=3, padding=2, normalize=False) for denoise_img in show_imgs]
         concat_img = torch.stack(concat_img, dim=0)
         if writer is not None:
-            writer.add_scalar("Loss/train", sum(train_losses) / len(train_losses), epoch)
-            writer.add_scalar("Loss/eval", sum(eval_losses) / len(eval_losses), epoch)
-            writer.add_images(f"generate", concat_img, epoch)
+            writer.add_scalar("train/loss", avg_train_loss, epoch)
+            writer.add_scalar("eval/loss", avg_eval_loss, epoch)
+            writer.add_images("eval/generate", concat_img, epoch)
+            writer.add_scalar("train/lr", opt.param_groups[0]["lr"], epoch)
+        scheduler.step()
 
 
 def lets_go(input_args):
+    random.seed(input_args.seed)  # Python 内置 random 模块
+    np.random.seed(input_args.seed)  # NumPy 随机数
+    torch.manual_seed(input_args.seed)  # CPU 上的 PyTorch 随机数
+
     writer = SummaryWriter(f"train_saves/{input_args.tran_id}/runs")
 
-    training_data = datasets.CIFAR100(root="data", train=True, download=True, transform=ToTensor())
+    dataset_transforms = transforms.Compose(
+        [transforms.ToTensor(), transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])]
+    )
+    training_data = datasets.CIFAR100(root="data", train=True, download=True, transform=dataset_transforms)
 
-    test_data = datasets.CIFAR100(root="data", train=False, download=True, transform=ToTensor())
+    test_data = datasets.CIFAR100(root="data", train=False, download=True, transform=dataset_transforms)
 
     train_dataloader = DataLoader(
         training_data,
@@ -126,11 +142,21 @@ def main():
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--epoch_size", type=int, default=500)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--tran_id", type=str, default="toy0")
+    parser.add_argument("--tran_id", type=str, default="toy2_sheduler_lr")
+    parser.add_argument("--seed", type=int, default=1225)
     lets_go(parser.parse_args())
 
 
 if __name__ == "__main__":
     main()
+
+#
+
+# train log:
+"""
+toy2: scheduler learning_rate
+
+"""
+
 
 #
