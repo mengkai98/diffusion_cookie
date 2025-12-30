@@ -15,9 +15,16 @@ import random
 import numpy as np
 
 
+def update_ema(ema_model, model, beta=0.999):
+    with torch.no_grad():  # 不计算梯度
+        for ema_param, param in zip(ema_model.parameters(), model.parameters()):
+            ema_param.data.mul_(beta).add_(param.data, alpha=1 - beta)
+
+
 def train(
     total_epoch,
     model,
+    ema_model,
     diffusion,
     train_dataloader,
     test_dataloader,
@@ -37,6 +44,10 @@ def train(
     if resume is not None and os.path.exists(resume):
         model.load_state_dict(torch.load(resume, weights_only=True))
     model.train()
+
+    ema_model.load_state_dict(model.state_dict())
+    ema_model.eval()
+    ema_model = ema_model.to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0)
     scheduler = StepLR(opt, step_size=50, gamma=0.1)
     # print(scheduler.get_last_lr())
@@ -58,21 +69,22 @@ def train(
             opt.step()
             train_losses.append(loss.item())
         # 评估
-        model.eval()
+        update_ema(ema_model, model, 0.999)
+        ema_model.eval()
         with torch.no_grad():
             for imgs, _ in test_dataloader:
                 t = torch.randint(0, diffusion.num_timesteps, (imgs.shape[0],))
                 imgs, noise = diffusion.add_noise(imgs, t)
                 imgs = imgs.to(torch.float32).to(device)
                 noise = noise.to(device)
-                output = model(imgs, t)
+                output = ema_model(imgs, t)
                 loss = F.mse_loss(output, noise)
                 eval_losses.append(loss.item())
         avg_train_loss = sum(train_losses) / len(train_losses)
         avg_eval_loss = sum(eval_losses) / len(eval_losses)
         if module_save_path is not None:
             torch.save(
-                model.state_dict(), os.path.join(module_save_path, f"model_ep{epoch}_tl_{avg_eval_loss:0.4f}.pth")
+                ema_model.state_dict(), os.path.join(module_save_path, f"model_ep{epoch}_tl_{avg_eval_loss:0.4f}.pth")
             )
 
         # denoise
@@ -80,9 +92,9 @@ def train(
         show_imgs = [noise_img]
         denoise_img = noise_img.clone()
         with torch.no_grad():
-            model.eval()
+            ema_model.eval()
             for t in indices:
-                denoise_img = diffusion.denoise(model, denoise_img, t, device, True)
+                denoise_img = diffusion.denoise(ema_model, denoise_img, t, device, True)
                 if t % 100 == 0:
                     show_imgs.append(denoise_img.cpu())
         show_imgs = [(torch.clamp(img, min=-1, max=1) + 1) / 2 for img in show_imgs]
@@ -121,6 +133,7 @@ def lets_go(input_args):
         shuffle=True,
     )
     model = UNet()
+    ema_model = UNet()
     solver = DDPM()
     save_weight_folder = f"train_saves/{input_args.tran_id}/weights"
     if not os.path.exists(save_weight_folder):
@@ -128,6 +141,7 @@ def lets_go(input_args):
     train(
         input_args.epoch_size,
         model,
+        ema_model,
         solver,
         train_dataloader,
         test_dataloader,
@@ -142,7 +156,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--epoch_size", type=int, default=500)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--tran_id", type=str, default="toy2_sheduler_lr")
+    parser.add_argument("--tran_id", type=str, default="toy3_ema")
     parser.add_argument("--seed", type=int, default=1225)
     lets_go(parser.parse_args())
 

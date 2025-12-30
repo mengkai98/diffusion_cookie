@@ -2,12 +2,43 @@ import torch
 import torch.nn as nn
 
 
+class SelfAttention(nn.Module):
+    def __init__(self, embed_size=512, heads=8, dropout=0.0):
+        super(SelfAttention, self).__init__()
+        self.embed_size = embed_size
+        self.heads = heads
+        self.norm = nn.LayerNorm(embed_size)
+        self.attention = nn.MultiheadAttention(
+            embed_dim=embed_size, num_heads=heads, dropout=dropout, batch_first=False
+        )
+
+    def forward(self, x):
+        N, C, H, W = x.shape
+        assert C == self.embed_size, f"Input channel {C} != embed_size {self.embed_size}"
+
+        # (N, C, H, W) -> (L, N, E)
+        x_reshaped = x.view(N, C, H * W).permute(2, 0, 1)  # (L, N, E)
+
+        # Pre-LayerNorm
+        x_norm = self.norm(x_reshaped)
+
+        # Self-attention
+        attn_output, _ = self.attention(x_norm, x_norm, x_norm)
+
+        # Residual connection
+        out_reshaped = attn_output + x_reshaped
+
+        # Reshape back: (L, N, E) -> (N, C, H, W)
+        out = out_reshaped.permute(1, 2, 0).view(N, C, H, W)
+        return out
+
+
 class UNet(nn.Module):
     """
     一个简单的UNet网络
     """
 
-    def __init__(self, time_emb_dim=32):
+    def __init__(self, time_emb_dim=32, use_attention=False):
         super().__init__()
 
         # 对正余弦的编码结果，再使用mlp进行一次编码，让编码过程是可学习的
@@ -23,6 +54,9 @@ class UNet(nn.Module):
         self.enc3 = self.conv_block(128, 256)
 
         self.bottleneck = self.conv_block(256, 512)
+        self.use_attention = use_attention
+        if use_attention:
+            self.bottleneck_attention = nn.Sequential(*[SelfAttention(embed_size=512, heads=8) for _ in range(4)])
 
         # 三个用于解码的卷积层
         self.dec3 = self.conv_block(512 + 256, 256)
@@ -43,10 +77,10 @@ class UNet(nn.Module):
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
         )
 
     def get_time_embedding(self, timestep, dim=32, max_period=10000):
@@ -78,7 +112,8 @@ class UNet(nn.Module):
         # 在bottleneck之前，apply时间编码
         e3 = e3 + time_emb  # 广播加法
         b = self.bottleneck(self.pool(e3))  # (B, 512, 4, 4)
-
+        if self.use_attention:
+            b = self.bottleneck_attention(b)
         # 解码过程 (上采样 -> 拼接 -> 解码) -> (上采样 -> 拼接 -> 解码) -> (上采样 -> 拼接 -> 解码)
         d3 = self.upsample(b)  # (B, 512, 8, 8)
         d3 = torch.cat([d3, e3], dim=1)  # (B, 512+256, 8, 8)
