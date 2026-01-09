@@ -13,6 +13,7 @@ class DDPM:
         self.fix_noise = {}
 
     def add_noise(self, x, t):
+        t = t.cpu()
         noise = torch.randn_like(x)
         sqrt_alphas_cumprod = torch.from_numpy(self.sqrt_alphas_cumprod[t])
         sqrt_one_minus_alphas_cumprod = torch.from_numpy(self.sqrt_one_minus_alphas_cumprod[t])

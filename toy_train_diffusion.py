@@ -17,6 +17,7 @@ from utils.ema import EMA
 from utils.img_transforms import CustomResizeCrop
 from dataset.pet_finder_dataset import PetFinderDataset
 import json
+from model.unet_ddpm import UNet as DDPM_UNET
 
 
 class Trainer:
@@ -31,11 +32,21 @@ class Trainer:
         self._init_seed(self.seed)
         self._init_noise_img(self.image_size)
         self._init_diffusion()
-        self._init_model(self.resume)
+        self._init_model()
         self._init_dataset(self.dataset, self.image_size, self.batch_size)
         self._init_optimizer(self.lr)
         self._init_saves(self.train_id)
+        self.load_weight(self.resume)
         self._save_args(input_args)
+
+    def load_weight(self, resume):
+        self.start_epoch = 0
+        if resume is not None and os.path.exists(resume):
+            save_dict = torch.load(resume, map_location=self.device)
+            self.model.load_state_dict(save_dict["model"])
+            self.optimizer.load_state_dict(save_dict["optimizer"])
+            self.scheduler.load_state_dict(save_dict["sheduler"])
+            self.start_epoch = save_dict["epoch"] + 1
 
     def parser_args(self, input_args):
         self.seed = input_args.seed
@@ -63,10 +74,8 @@ class Trainer:
     def _init_diffusion(self):
         self.diffusion = DDPM()
 
-    def _init_model(self, resume=None):
-        self.model = EMA(UNet(use_attention=True))
-        if resume is not None and os.path.exists(resume):
-            self.model.load_state_dict(torch.load(resume, weights_only=True))
+    def _init_model(self):
+        self.model = EMA(DDPM_UNET())
 
     def _init_optimizer(self, lr=1e-4):
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr, weight_decay=0)
@@ -113,13 +122,13 @@ class Trainer:
         device = self.device
         model = self.model
         model.to(device)
-        for epoch in range(self.epoch_size):
+        for epoch in range(self.start_epoch, self.epoch_size):
             # 训练
             model.train()
             train_losses = []
             eval_losses = []
             for imgs, _ in tqdm(self.train_dataloader, desc=f"epoch:{epoch}"):
-                t = torch.randint(0, self.diffusion.num_timesteps, (imgs.shape[0],))
+                t = torch.randint(0, self.diffusion.num_timesteps, (imgs.shape[0],), device=device)
                 imgs, noise = self.diffusion.add_noise(imgs, t)
                 imgs = imgs.to(torch.float32).to(device)
                 noise = noise.to(device)
@@ -138,7 +147,7 @@ class Trainer:
             model.eval()
             with torch.no_grad():
                 for imgs, _ in self.test_dataloader:
-                    t = torch.randint(0, self.diffusion.num_timesteps, (imgs.shape[0],))
+                    t = torch.randint(0, self.diffusion.num_timesteps, (imgs.shape[0],), device=device)
                     imgs, noise = self.diffusion.add_noise(imgs, t)
                     imgs = imgs.to(torch.float32).to(device)
                     noise = noise.to(device)
@@ -147,11 +156,6 @@ class Trainer:
                     eval_losses.append(loss.item())
             avg_train_loss = sum(train_losses) / len(train_losses)
             avg_eval_loss = sum(eval_losses) / len(eval_losses)
-            if self.save_weight_folder is not None:
-                torch.save(
-                    model.state_dict(),
-                    os.path.join(self.save_weight_folder, f"model_ep{epoch}_tl_{avg_eval_loss:0.4f}.pth"),
-                )
 
             # denoise
             indices = list(range(1000))[::-1]
@@ -174,21 +178,35 @@ class Trainer:
                 self.writer.add_images("eval/generate", concat_img, epoch)
                 self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]["lr"], epoch)
 
-            self.scheduler.step()
             save_image(
                 concat_img[-1],
                 os.path.join(self.denoise_image_folder, f"epoch_{epoch}_.png"),
             )
+            self.scheduler.step()
+            if self.save_weight_folder is not None:
+                torch.save(
+                    {
+                        "model": model.state_dict(),
+                        "optimizer": self.optimizer.state_dict(),
+                        "sheduler": self.scheduler.state_dict(),
+                        "epoch": epoch,
+                    },
+                    os.path.join(self.save_weight_folder, f"model_ep{epoch}_tl_{avg_eval_loss:0.4f}.pth"),
+                )
 
 
 def main():
     parser = argparse.ArgumentParser("Toy Diffusion")
-    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epoch_size", type=int, default=1000)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--train_id", type=str, default="toy6_gelu")
+    parser.add_argument("--train_id", type=str, default="toy7_new_unet")
     parser.add_argument("--seed", type=int, default=1225)
-    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default="/work/playground/diffusion_cookie/train_saves/toy7_new_unet/weights/model_ep629_tl_0.0374.pth",
+    )
     parser.add_argument("--image_size", type=int, default=64)
     parser.add_argument("--dataset", type=str, default="PetFinderDataset", choices=["CIFAR100", "PetFinderDataset"])
     trainer = Trainer(parser.parse_args())
